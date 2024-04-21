@@ -107,7 +107,7 @@ func createFakeCallRecordsBatch(batchNumber, batchSize int) error {
 		return fmt.Errorf(errMsg)
 	}
 
-	log.Println("runID:%s batchNumber: %d batchSize: %d", runID, batchNumber, batchSize)
+	log.Printf("runID:%s batchNumber: %d batchSize: %d", runID, batchNumber, batchSize)
 
 	return err
 }
