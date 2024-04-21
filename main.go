@@ -26,17 +26,17 @@ func main() {
 	n := 200
 	batchSize := 1000
 
-	generateFakeCalls(n, batchSize)
+	generateFakeCallRecords(n, batchSize)
 }
 
-func generateFakeCalls(n, batchSize int) {
+func generateFakeCallRecords(n, batchSize int) {
 	wg := errgroup.Group{}
 
 	var processed atomic.Int64
 
 	for i := range n {
 		wg.Go(func() error {
-			err := createFakeCallsBatch(i, batchSize)
+			err := createFakeCallRecordsBatch(i, batchSize)
 			if err != nil {
 				return err
 			} else {
@@ -55,7 +55,7 @@ func generateFakeCalls(n, batchSize int) {
 	log.Printf("total number of rows: %d", processed.Load())
 }
 
-func createFakeCallsBatch(batchNumber, batchSize int) error {
+func createFakeCallRecordsBatch(batchNumber, batchSize int) error {
 	producerWg := errgroup.Group{}
 	consumerWg := errgroup.Group{}
 
@@ -67,7 +67,7 @@ func createFakeCallsBatch(batchNumber, batchSize int) error {
 
 	for _ = range batchSize {
 		producerWg.Go(func() error {
-			createFakeCall(calls)
+			createFakeCallRecord(calls)
 			return nil
 		})
 	}
@@ -113,7 +113,7 @@ func createFakeCallsBatch(batchNumber, batchSize int) error {
 }
 
 // creates a fake call struct and writes it into the out channel
-func createFakeCall(out chan<- models.Call) {
+func createFakeCallRecord(out chan<- models.Call) {
 	var call models.Call
 	gofakeit.Struct(&call)
 	call.CallOutcome = gofakeit.Paragraph(20, 20, 20, ".")
