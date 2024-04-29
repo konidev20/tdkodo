@@ -14,13 +14,14 @@ type Employee struct {
 }
 
 type Call struct {
-	ID            int       `json:"id"`
-	EmployeeID    int       `json:"employee_id"`
-	CallDate      time.Time `json:"call_date"`
-	CallDuration  int       `json:"call_duration"`
-	CustomerName  string    `json:"customer_name"`
-	CustomerPhone string    `json:"customer_phone"`
-	CallOutcome   string    `json:"call_outcome"`
+	ID               int    `json:"id"`
+	EmployeeID       int    `json:"employee_id"`
+	CallDate         string `json:"call_date"`
+	CallDuration     int    `json:"call_duration"`
+	CustomerName     string `json:"customer_name"`
+	CustomerFeedback string `json:"customer_feedback"`
+	CustomerPhone    string `json:"customer_phone"`
+	CallOutcome      string `json:"call_outcome"`
 }
 
 type Contract struct {

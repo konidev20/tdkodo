@@ -4,39 +4,45 @@ Copyright © 2024 NAME HERE <EMAIL ADDRESS>
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/brianvoe/gofakeit"
 	"github.com/konidev20/tdkodo/models"
 	"golang.org/x/sync/errgroup"
+
+	_ "github.com/godror/godror"
 )
 
-var runID string
-
-func init() {
-	runID = gofakeit.UUID()
-}
+const (
+	dbUser     = ""
+	dbPassword = ""
+	dbHost     = ""
+	dbPort     = ""
+	dbService  = ""
+)
 
 func main() {
+	n := 3000
+	batchSize := 100
 
-	n := 200
-	batchSize := 1000
-
-	generateFakeCallRecords(n, batchSize)
+	runID := gofakeit.UUID()
+	generateFakeCallRecords(runID, n, batchSize)
 }
 
-func generateFakeCallRecords(n, batchSize int) {
+func generateFakeCallRecords(runID string, n, batchSize int) {
 	wg := errgroup.Group{}
 
 	var processed atomic.Int64
 
 	for i := range n {
 		wg.Go(func() error {
-			err := createFakeCallRecordsBatch(i, batchSize)
+			err := createFakeCallRecordsBatch(runID, i, batchSize)
 			if err != nil {
 				return err
 			} else {
@@ -55,13 +61,13 @@ func generateFakeCallRecords(n, batchSize int) {
 	log.Printf("total number of rows: %d", processed.Load())
 }
 
-func createFakeCallRecordsBatch(batchNumber, batchSize int) error {
+func createFakeCallRecordsBatch(runID string, batchNumber, batchSize int) error {
 	producerWg := errgroup.Group{}
 	consumerWg := errgroup.Group{}
 
-	var placeholders []string
-	// var values []interface{}
-	var values []string
+	stringBuilder := strings.Builder{}
+
+	stringBuilder.WriteString("INSERT ALL ")
 
 	calls := make(chan models.Call, batchSize)
 
@@ -74,9 +80,7 @@ func createFakeCallRecordsBatch(batchNumber, batchSize int) error {
 
 	consumerWg.Go(func() error {
 		for call := range calls {
-			placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?)")
-			// values = append(values, call.EmployeeID, call.CallDate, call.CallDuration, call.CustomerName, call.CustomerPhone, call.CallOutcome)
-			values = append(values, string(call.EmployeeID), call.CallDate.String(), string(call.CallDuration), call.CustomerName, call.CustomerPhone, call.CallOutcome)
+			stringBuilder.WriteString(fmt.Sprintf(" INTO sys.calls (call_id, employee_id, call_date, call_duration, customer_name, customer_phone, call_outcome, customer_feedback) VALUES (%d, %d, '%s', %d, '%s', '%s', '%s', '%s')", call.ID, call.EmployeeID, call.CallDate, call.CallDuration, call.CustomerName, call.CustomerPhone, call.CallOutcome, call.CustomerFeedback))
 		}
 
 		return nil
@@ -88,23 +92,27 @@ func createFakeCallRecordsBatch(batchNumber, batchSize int) error {
 
 	consumerWg.Wait()
 
-	//query := "INSERT INTO calls (employee_id, call_date, call_duration, customer_name, customer_phone, call_outcome) VALUES " + strings.Join(placeholders, ", ")
-	query := "INSERT INTO calls (employee_id, call_date, call_duration, customer_name, customer_phone, call_outcome) VALUES " + strings.Join(values, ", ")
+	stringBuilder.WriteString(" SELECT * FROM DUAL")
+
+	query := stringBuilder.String()
 
 	queryFileName := fmt.Sprintf("calls-%s-batchNumber-%d", runID, batchNumber)
 
-	queryFile, err := os.Create(queryFileName)
+	err := writeQueryToFile(queryFileName, query, runID, batchNumber, batchSize)
 	if err != nil {
-		errMsg := fmt.Sprintf("failed to create and open file %s: %s", queryFileName, err.Error())
-		log.Printf(errMsg)
-		return fmt.Errorf(errMsg)
+		log.Print(err.Error())
 	}
 
-	_, err = fmt.Fprintln(queryFile, query)
+	// Open a connection to the Oracle database
+	db, err := sql.Open("godror", fmt.Sprintf("%s/%s@%s:%s/%s as sysdba", dbUser, dbPassword, dbHost, dbPort, dbService))
 	if err != nil {
-		errMsg := fmt.Sprintf("failed to write insert query to file %s: %s", queryFileName, err.Error())
-		log.Printf(errMsg)
-		return fmt.Errorf(errMsg)
+		return fmt.Errorf("failed to open connection to Oracle database: %s", err.Error())
+	}
+	defer db.Close()
+
+	_, err = db.Exec(query)
+	if err != nil {
+		return fmt.Errorf("failed to insert records: %s", err.Error())
 	}
 
 	log.Printf("runID:%s batchNumber: %d batchSize: %d", runID, batchNumber, batchSize)
@@ -112,10 +120,35 @@ func createFakeCallRecordsBatch(batchNumber, batchSize int) error {
 	return err
 }
 
+func writeQueryToFile(queryFileName string, query string, runID string, batchNumber int, batchSize int) error {
+	queryFile, err := os.Create(queryFileName)
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to create and open file %s: %s", queryFileName, err.Error())
+		log.Print(errMsg)
+		return fmt.Errorf(errMsg)
+	}
+
+	_, err = fmt.Fprintln(queryFile, query)
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to write insert query to file %s: %s", queryFileName, err.Error())
+		log.Print(errMsg)
+		return fmt.Errorf(errMsg)
+	}
+
+	log.Printf("insert query written to file %s runID:%s batchNumber: %d batchSize: %d", queryFileName, runID, batchNumber, batchSize)
+	return nil
+}
+
 // creates a fake call struct and writes it into the out channel
 func createFakeCallRecord(out chan<- models.Call) {
 	var call models.Call
-	gofakeit.Struct(&call)
-	call.CallOutcome = gofakeit.Paragraph(20, 20, 20, ".")
+	call.ID = gofakeit.Number(1, 1000000)
+	call.EmployeeID = gofakeit.Number(1, 1000000)
+	call.CallDuration = gofakeit.Number(1, 1000000)
+	call.CallOutcome = gofakeit.Paragraph(10, 5, 10, "")
+	call.CustomerFeedback = gofakeit.Paragraph(10, 5, 10, "")
+	call.CallDate = gofakeit.DateRange(time.Date(2020, 1, 0, 0, 0, 0, 0, time.UTC), time.Now()).String()
+	call.CustomerName = gofakeit.Name()
+	call.CustomerPhone = gofakeit.Phone()
 	out <- call
 }
