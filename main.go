@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -30,80 +31,51 @@ const (
 )
 
 func main() {
+
+	var mx sync.Mutex
+
 	n := flag.Int("batches", 2000, "--batches=3000")
 	batchSize := flag.Int("batchSize", 1000, "--batchSize=1000")
 	cycles := flag.Int("cycles", 20, "--cycles=20")
-	parallelism := flag.Int("parallelism", 2, "--parallelism=4")
 
 	flag.Parse()
 
-	producerWg := errgroup.Group{}
-	consumerWg := errgroup.Group{}
-
-	type controlFileStruct struct {
-		runID           string
-		controlFileName string
-	}
-
-	controlFiles := make(chan controlFileStruct, *cycles)
+	wg := errgroup.Group{}
 
 	start := time.Now()
 
-	consumerWg.Go(func() error {
-		for controlFile := range controlFiles {
-			log.Printf("running sqlldr for runID: %s controlFileName: %s", controlFile.runID, controlFile.controlFileName)
-			err := runSQLLoader(controlFile.controlFileName)
-			if err != nil {
-				log.Printf("failed to run sqlldr for runID: %s controlFileName: %s : %s", controlFile.runID, controlFile.controlFileName, err.Error())
-				return err
-			}
-			log.Printf("sqlldr completed for runID: %s controlFileName: %s", controlFile.runID, controlFile.controlFileName)
-		}
-		return nil
-	})
-
-	sem := make(chan struct{}, *parallelism)
-
 	for _ = range *cycles {
-		sem <- struct{}{} // Acquire a token.
+		runID := gofakeit.UUID()
+		dataGenStart := time.Now()
+		controlFileName, err := generateFakeCallRecordsToCSV(runID, *n, *batchSize)
+		if err != nil {
+			log.Printf("failed to generate data for runID: %s : %s", runID, err.Error())
+			return
+		}
+		dataGenStartElapsed := time.Since(dataGenStart)
 
-		producerWg.Go(func() error {
-			defer func() { <-sem }()
-			runID := gofakeit.UUID()
-			dataGenStart := time.Now()
-			controlFileName, err := generateFakeCallRecordsToCSV(runID, *n, *batchSize)
+		log.Printf("data generation time taken for runID: %s controlFileName: %s = %s", runID, controlFileName, dataGenStartElapsed)
+
+		wg.Go(func() error {
+			mx.Lock()
+			defer mx.Unlock()
+
+			log.Printf("running sqlldr for runID: %s controlFileName: %s", runID, controlFileName)
+			err = runSQLLoader(controlFileName)
 			if err != nil {
-				log.Printf("failed to generate data for runID: %s : %s", runID, err.Error())
+				log.Printf("failed to run sqlldr for runID: %s controlFileName: %s : %s", runID, controlFileName, err.Error())
 				return err
 			}
-			dataGenStartElapsed := time.Since(dataGenStart)
-
-			controlFiles <- controlFileStruct{runID: runID, controlFileName: controlFileName}
-
-			log.Printf("data generation time taken for runID: %s controlFileName: %s = %s", runID, controlFileName, dataGenStartElapsed)
+			log.Printf("sqlldr completed for runID: %s controlFileName: %s", runID, controlFileName)
 			return nil
 		})
 	}
 
-	err := producerWg.Wait()
+	err := wg.Wait()
 	if err != nil {
-		log.Printf("producer error: %s", err.Error())
+		log.Printf("error: %s", err.Error())
 		return
 	}
-
-	// Wait for all goroutines to finish.
-	for i := 0; i < cap(sem); i++ {
-		sem <- struct{}{}
-	}
-
-	close(controlFiles)
-
-	err = consumerWg.Wait()
-	if err != nil {
-		log.Printf("consumer error: %s", err.Error())
-		return
-	}
-
 	elapsed := time.Since(start)
 	log.Default().Printf("total time taken: %s", elapsed)
 }
