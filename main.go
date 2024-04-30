@@ -5,11 +5,13 @@ package main
 
 import (
 	"database/sql"
+	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -29,18 +31,65 @@ const (
 )
 
 func main() {
-	n := 2000
-	batchSize := 1000
 
-	runID := gofakeit.UUID()
-	err := generateFakeCallRecordsToCSV(runID, n, batchSize)
+	var mx sync.Mutex
+
+	n := flag.Int("batches", 2000, "--batches=3000")
+	batchSize := flag.Int("batchSize", 1000, "--batchSize=1000")
+	cycles := flag.Int("cycles", 20, "--cycles=20")
+
+	flag.Parse()
+
+	wg := errgroup.Group{}
+
+	start := time.Now()
+
+	for _ = range *cycles {
+		runID := gofakeit.UUID()
+		dataGenStart := time.Now()
+		controlFileName, err := generateFakeCallRecordsToCSV(runID, *n, *batchSize)
+		if err != nil {
+			log.Printf("failed to generate data for runID: %s : %s", runID, err.Error())
+			return
+		}
+		dataGenStartElapsed := time.Since(dataGenStart)
+
+		log.Printf("data generation time taken for runID: %s controlFileName: %s = %s", runID, controlFileName, dataGenStartElapsed)
+
+		wg.Go(func() error {
+			mx.Lock()
+			defer mx.Unlock()
+
+			log.Printf("running sqlldr for runID: %s controlFileName: %s", runID, controlFileName)
+			err = runSQLLoader(controlFileName)
+			if err != nil {
+				log.Printf("failed to run sqlldr for runID: %s controlFileName: %s : %s", runID, controlFileName, err.Error())
+				return err
+			}
+			log.Printf("sqlldr completed for runID: %s controlFileName: %s", runID, controlFileName)
+			return nil
+		})
+	}
+
+	err := wg.Wait()
 	if err != nil {
 		log.Printf("error: %s", err.Error())
 		return
 	}
+	elapsed := time.Since(start)
+	log.Default().Printf("total time taken: %s", elapsed)
 }
 
-func generateFakeCallRecordsToCSV(runID string, n, batchSize int) error {
+func runSQLLoader(controlFileName string) error {
+	cmd := exec.Command("sqlldr", "userid=\"/ as sysdba\"", "control="+controlFileName, "direct=true", "log="+controlFileName+".log", "parallel=true")
+	err := cmd.Run()
+	if err != nil {
+		return fmt.Errorf("failed to run sqlldr: %s", err.Error())
+	}
+	return nil
+}
+
+func generateFakeCallRecordsToCSV(runID string, n, batchSize int) (string, error) {
 	wg := errgroup.Group{}
 
 	var processed atomic.Int64
@@ -59,27 +108,21 @@ func generateFakeCallRecordsToCSV(runID string, n, batchSize int) error {
 
 	err := wg.Wait()
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	controlFileName := fmt.Sprintf("calls-control-%s.ctl", runID)
 
-	err = createControlFile(controlFileName, n)
+	err = createCallsControlFile(runID, controlFileName, n)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	cmd := exec.Command("sqlldr", "userid=\"/ as sysdba\"", "control="+controlFileName, "direct=true")
-	err = cmd.Run()
-	if err != nil {
-		return fmt.Errorf("failed to run sqlldr: %s", err.Error())
-	}
-
-	log.Printf("total number of rows: %d", processed.Load())
-	return nil
+	log.Printf("generated rows: %d for runID: %s controlFileName: %s", processed.Load(), runID, controlFileName)
+	return controlFileName, nil
 }
 
-func createControlFile(controlFileName string, n int) error {
+func createCallsControlFile(runID, controlFileName string, n int) error {
 	controlFile, err := os.Create(controlFileName)
 	if err != nil {
 		errMsg := fmt.Sprintf("failed to create and open file %s: %s", controlFileName, err.Error())
@@ -93,7 +136,7 @@ func createControlFile(controlFileName string, n int) error {
 	}
 
 	for i := range n {
-		_, err = fmt.Fprintln(controlFile, fmt.Sprintf("INFILE 'calls-batchNumber-%d.csv'", i))
+		_, err = fmt.Fprintln(controlFile, fmt.Sprintf("INFILE 'calls-%s-batchNumber-%d.csv'", runID, i))
 		if err != nil {
 			errMsg := fmt.Sprintf("failed to write INFILE to file %s: %s", controlFileName, err.Error())
 			log.Print(errMsg)
@@ -131,7 +174,7 @@ func createFakeCallRecordsBatchToCSV(runID string, batchNumber, batchSize int) e
 
 	calls := make(chan models.Call, batchSize)
 
-	csvFileName := fmt.Sprintf("calls-batchNumber-%d.csv", batchNumber)
+	csvFileName := fmt.Sprintf("calls-%s-batchNumber-%d.csv", runID, batchNumber)
 
 	csvFile, err := os.Create(csvFileName)
 	if err != nil {
@@ -169,7 +212,7 @@ func createFakeCallRecordsBatchToCSV(runID string, batchNumber, batchSize int) e
 
 	csvFile.Sync()
 
-	log.Printf("runID:%s batchNumber: %d batchSize: %d", runID, batchNumber, batchSize)
+	//log.Printf("runID:%s batchNumber: %d batchSize: %d", runID, batchNumber, batchSize)
 
 	return err
 }
