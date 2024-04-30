@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -28,11 +29,163 @@ const (
 )
 
 func main() {
-	n := 3000
-	batchSize := 100
+	n := 2000
+	batchSize := 1000
 
 	runID := gofakeit.UUID()
-	generateFakeCallRecords(runID, n, batchSize)
+	err := generateFakeCallRecordsToCSV(runID, n, batchSize)
+	if err != nil {
+		log.Printf("error: %s", err.Error())
+		return
+	}
+}
+
+func generateFakeCallRecordsToCSV(runID string, n, batchSize int) error {
+	wg := errgroup.Group{}
+
+	var processed atomic.Int64
+
+	for i := range n {
+		wg.Go(func() error {
+			err := createFakeCallRecordsBatchToCSV(runID, i, batchSize)
+			if err != nil {
+				return err
+			} else {
+				processed.Add(int64(batchSize))
+			}
+			return nil
+		})
+	}
+
+	err := wg.Wait()
+	if err != nil {
+		return err
+	}
+
+	controlFileName := fmt.Sprintf("calls-control-%s.ctl", runID)
+
+	err = createControlFile(controlFileName, n)
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.Command("sqlldr", "userid=\"/ as sysdba\"", "control="+controlFileName, "direct=true")
+	err = cmd.Run()
+	if err != nil {
+		return fmt.Errorf("failed to run sqlldr: %s", err.Error())
+	}
+
+	log.Printf("total number of rows: %d", processed.Load())
+	return nil
+}
+
+func createControlFile(controlFileName string, n int) error {
+	controlFile, err := os.Create(controlFileName)
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to create and open file %s: %s", controlFileName, err.Error())
+		log.Print(errMsg)
+	}
+
+	_, err = fmt.Fprintln(controlFile, "LOAD DATA")
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to write LOAD DATA to file %s: %s", controlFileName, err.Error())
+		log.Print(errMsg)
+	}
+
+	for i := range n {
+		_, err = fmt.Fprintln(controlFile, fmt.Sprintf("INFILE 'calls-batchNumber-%d.csv'", i))
+		if err != nil {
+			errMsg := fmt.Sprintf("failed to write INFILE to file %s: %s", controlFileName, err.Error())
+			log.Print(errMsg)
+		}
+	}
+
+	_, err = fmt.Fprintln(controlFile, "APPEND")
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to write APPEND to file %s: %s", controlFileName, err.Error())
+		log.Print(errMsg)
+	}
+
+	_, err = fmt.Fprintln(controlFile, "INTO TABLE sys.calls")
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to write INTO TABLE to file %s: %s", controlFileName, err.Error())
+		log.Print(errMsg)
+	}
+
+	_, err = fmt.Fprintln(controlFile, "FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '\"'")
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to write FIELDS TERMINATED BY ',' to file %s: %s", controlFileName, err.Error())
+		log.Print(errMsg)
+	}
+
+	_, err = fmt.Fprintln(controlFile, "(call_id INTEGER, employee_id INTEGER, call_date, call_duration INTEGER, customer_name, customer_phone, call_outcome CHAR(32000), customer_feedback CHAR(32000))")
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to write fields to file %s: %s", controlFileName, err.Error())
+		log.Print(errMsg)
+	}
+	return err
+}
+
+func createFakeCallRecordsBatchToCSV(runID string, batchNumber, batchSize int) error {
+	producerWg := errgroup.Group{}
+
+	calls := make(chan models.Call, batchSize)
+
+	csvFileName := fmt.Sprintf("calls-batchNumber-%d.csv", batchNumber)
+
+	csvFile, err := os.Create(csvFileName)
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to create and open file %s: %s", csvFileName, err.Error())
+		log.Print(errMsg)
+		return fmt.Errorf(errMsg)
+	}
+
+	headers := fmt.Sprintf("call_id,employee_id,call_date,call_duration,customer_name,customer_phone,call_outcome,customer_feedback")
+
+	_, err = fmt.Fprintln(csvFile, headers)
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to write insert query to file %s: %s", csvFileName, err.Error())
+		log.Print(errMsg)
+		return fmt.Errorf(errMsg)
+	}
+
+	for _ = range batchSize {
+		producerWg.Go(func() error {
+			call := createFakeCallRecordSync()
+			line := fmt.Sprintf("%d,%d,%s,%d,%s,%s,%s,%s", call.ID, call.EmployeeID, call.CallDate, call.CallDuration, call.CustomerName, call.CustomerPhone, call.CallOutcome, call.CustomerFeedback)
+			_, err = fmt.Fprintln(csvFile, line)
+			if err != nil {
+				errMsg := fmt.Sprintf("failed to write insert query to file %s: %s", csvFileName, err.Error())
+				log.Print(errMsg)
+				return fmt.Errorf(errMsg)
+			}
+			return nil
+		})
+	}
+
+	producerWg.Wait()
+
+	close(calls)
+
+	csvFile.Sync()
+
+	log.Printf("runID:%s batchNumber: %d batchSize: %d", runID, batchNumber, batchSize)
+
+	return err
+}
+
+// creates a fake call struct and writes it into the out channel
+func createFakeCallRecordSync() models.Call {
+	var call models.Call
+	call.ID = gofakeit.Number(1, 1000000)
+	call.EmployeeID = gofakeit.Number(1, 1000000)
+	call.CallDuration = gofakeit.Number(1, 1000000)
+	call.CallOutcome = gofakeit.Paragraph(10, 10, 10, "")
+	call.CustomerFeedback = gofakeit.Paragraph(10, 10, 10, "")
+	call.CallDate = gofakeit.DateRange(time.Date(2020, 1, 0, 0, 0, 0, 0, time.UTC), time.Now()).String()
+	call.CustomerName = gofakeit.Name()
+	call.CustomerPhone = gofakeit.Phone()
+	return call
 }
 
 func generateFakeCallRecords(runID string, n, batchSize int) {
@@ -145,8 +298,8 @@ func createFakeCallRecord(out chan<- models.Call) {
 	call.ID = gofakeit.Number(1, 1000000)
 	call.EmployeeID = gofakeit.Number(1, 1000000)
 	call.CallDuration = gofakeit.Number(1, 1000000)
-	call.CallOutcome = gofakeit.Paragraph(10, 5, 10, "")
-	call.CustomerFeedback = gofakeit.Paragraph(10, 5, 10, "")
+	call.CallOutcome = gofakeit.Paragraph(10, 10, 10, "")
+	call.CustomerFeedback = gofakeit.Paragraph(10, 10, 10, "")
 	call.CallDate = gofakeit.DateRange(time.Date(2020, 1, 0, 0, 0, 0, 0, time.UTC), time.Now()).String()
 	call.CustomerName = gofakeit.Name()
 	call.CustomerPhone = gofakeit.Phone()
