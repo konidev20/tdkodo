@@ -11,90 +11,21 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/brianvoe/gofakeit"
-	"github.com/konidev20/tdkodo/internal/loaders/sqlldr"
 	"golang.org/x/sync/errgroup"
 )
 
-type controlFile struct {
-	table           string
-	runID           string
-	controlFileName string
+type Generator interface {
+	Table() string
+	CSVHeaders() string
+	CSVColumnMapping() string
+	FakeRecord() string
 }
 
-func Run(n, batchSize, cycles int) {
-	wg := errgroup.Group{}
+func Generate(runID string, n, batchSize int, generator Generator) (string, error) {
+	table := generator.Table()
+	headers := generator.CSVHeaders()
+	columns := generator.CSVColumnMapping()
 
-	controlFiles := make(chan controlFile, cycles)
-	loadedControlFiles := make(chan controlFile, cycles)
-
-	start := time.Now()
-
-	cleanupWg := errgroup.Group{}
-	cleanupWg.Go(func() error {
-		// CLEANER: will delete data which is loaded into the database
-		for controlFile := range loadedControlFiles {
-			err := os.RemoveAll(fmt.Sprintf("./%s/%s", controlFile.table, controlFile.runID))
-			if err != nil {
-				log.Printf("failed to delete directory for runID: %s : %s", controlFile.runID, err.Error())
-				return err
-			}
-		}
-		return nil
-	})
-
-	wg.Go(func() error {
-		// LOADER: will load any given control file, not dependent on the table name
-		for controlFile := range controlFiles {
-			err := sqlldr.Load(controlFile.runID, controlFile.controlFileName)
-			if err != nil {
-				log.Printf("failed to run sqlldr for runID: %s controlFileName: %s : %s", controlFile.runID, controlFile.controlFileName, err.Error())
-				return err
-			}
-			loadedControlFiles <- controlFile
-		}
-		return nil
-	})
-
-	for range cycles {
-		runID := gofakeit.UUID()
-
-		var call Call
-
-		table := call.Table()
-		headers := call.CSVHeaders()
-		columns := call.CSVColumns()
-
-		controlFileName, err := GenerateForTable(runID, table, headers, columns, n, batchSize, call.FakeRecord)
-		if err != nil {
-			log.Printf("failed to generate data for runID: %s : %s", runID, err.Error())
-			return
-		}
-
-		controlFiles <- controlFile{table: table, runID: runID, controlFileName: controlFileName}
-	}
-
-	close(controlFiles)
-
-	err := wg.Wait()
-	if err != nil {
-		log.Printf("error: %s", err.Error())
-		return
-	}
-
-	close(loadedControlFiles)
-
-	err = cleanupWg.Wait()
-	if err != nil {
-		log.Printf("error: %s", err.Error())
-		return
-	}
-
-	elapsed := time.Since(start)
-	log.Default().Printf("total time taken: %s", elapsed)
-}
-
-func GenerateForTable(runID, table, headers, columns string, n, batchSize int, lineFn func() string) (string, error) {
 	dataGenStart := time.Now()
 	wg := errgroup.Group{}
 
@@ -102,7 +33,7 @@ func GenerateForTable(runID, table, headers, columns string, n, batchSize int, l
 
 	for i := range n {
 		wg.Go(func() error {
-			err := generateCSVDataFile(runID, table, headers, i, batchSize, lineFn)
+			err := generateCSVDataFile(runID, table, headers, i, batchSize, generator.FakeRecord)
 			if err != nil {
 				return err
 			} else {
@@ -234,24 +165,4 @@ func generateCSVDataFile(runID, table, headers string, batchNumber, batchSize in
 	csvFile.Sync()
 
 	return err
-}
-
-type Call struct {
-}
-
-func (c Call) CSVHeaders() string {
-	return "call_id,employee_id,call_date,call_duration,customer_name,customer_phone,call_outcome,customer_feedback"
-}
-
-func (c Call) Table() string {
-	return "calls"
-}
-
-func (c Call) CSVColumns() string {
-	return "(call_id INTEGER, employee_id INTEGER, call_date, call_duration INTEGER, customer_name, customer_phone, call_outcome CHAR(32000), customer_feedback CHAR(32000))"
-}
-
-func (c Call) FakeRecord() string {
-	// call_id,employee_id,call_date,call_duration,customer_name,customer_phone,call_outcome,customer_feedback
-	return fmt.Sprintf("%d,%d,%s,%d,%s,%s,%s,%s", gofakeit.Number(1, 1000000), gofakeit.Number(1, 1000000), gofakeit.DateRange(time.Date(2020, 1, 0, 0, 0, 0, 0, time.UTC), time.Now()).String(), gofakeit.Number(1, 1000000), gofakeit.Name(), gofakeit.Phone(), gofakeit.Paragraph(10, 10, 10, ""), gofakeit.Paragraph(10, 10, 10, ""))
 }

@@ -1,9 +1,10 @@
 CREATE TABLE calls (
-  id SERIAL PRIMARY KEY,
-  employee_id INTEGER,
-  call_date DATE,
-  call_duration INTEGER,
-  customer_name VARCHAR(100),
-  customer_phone VARCHAR(20),
-  call_outcome VARCHAR(100)
-);
+  call_id NUMBER,
+  employee_id NUMBER,
+  call_date VARCHAR(1000),
+  call_duration NUMBER,
+  customer_name VARCHAR2(100),
+  customer_phone VARCHAR2(20),
+  call_outcome CLOB, 
+  customer_feedback CLOB
+  );
